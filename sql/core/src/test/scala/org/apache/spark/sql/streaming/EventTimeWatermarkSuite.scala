@@ -25,7 +25,6 @@ import java.util.concurrent.TimeUnit._
 
 import org.apache.commons.io.FileUtils
 import org.scalatest.{BeforeAndAfter, Matchers}
-
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{AnalysisException, Dataset}
 import org.apache.spark.sql.catalyst.plans.logical.EventTimeWatermark
@@ -34,7 +33,9 @@ import org.apache.spark.sql.execution.streaming.sources.MemorySink
 import org.apache.spark.sql.functions.{count, window}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.streaming.OutputMode._
+import org.apache.spark.sql.streaming.RhythmSchemas.{RhythmInterpretationRecord, RhythmMTERecord}
 import org.apache.spark.util.Utils
+import org.apache.spark.sql.functions._
 
 class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matchers with Logging {
 
@@ -728,6 +729,53 @@ class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matche
       }
       assert(e.getMessage.toLowerCase(Locale.ROOT).contains("valid values are 'min' and 'max'"))
     }
+  }
+
+  /**
+    * Rohit's leftouter test
+    */
+
+  val rhythmRecord1 = new RhythmMTERecord("Siri1", "1", new java.sql.Timestamp(1L))
+  val rhythmRecord2 = new RhythmMTERecord("Siri2", "2", new java.sql.Timestamp(20L))
+  val rhythmRecord3 = new RhythmMTERecord("Siri3", "3", new java.sql.Timestamp(30L))
+  val rhythmRecord4 = new RhythmMTERecord("Siri4", "4", new java.sql.Timestamp(40L))
+
+  val intRecord1 =
+    new RhythmInterpretationRecord(Some("Phone"), Some("1"), new java.sql.Timestamp(1L))
+  val intRecord2 =
+    new RhythmInterpretationRecord(Some("Text"), Some("2"), new java.sql.Timestamp(2L))
+
+  test("join - leftOuter") {
+    val mteMemoryStream = MemoryStream[RhythmMTERecord]
+    val interpMemoryStream = MemoryStream[RhythmInterpretationRecord]
+
+    val mte = mteMemoryStream
+      .toDF
+      .withWatermark("timestamp", "0 seconds")
+
+    val interp = interpMemoryStream
+      .toDF
+      .withWatermark("requestTimeBegin", "1500 seconds")
+
+    val df = mte.join(interp,
+      expr(
+        """
+        speech_session = interactionId AND
+        timestamp >= requestTimeBegin - interval 5 minutes AND
+        timestamp <= requestTimeBegin + interval 5 minutes
+       """), "leftOuter")
+
+    val checkpointDir = Utils.createTempDir().getCanonicalFile
+    testStream(df)(
+      StartStream(checkpointLocation = checkpointDir.getAbsolutePath),
+      Execute {
+        _.processAllAvailable()
+      },
+
+      AddData(mteMemoryStream, rhythmRecord1, rhythmRecord2, rhythmRecord3, rhythmRecord4),
+      AddData(interpMemoryStream, intRecord1, intRecord2),
+      CheckAnswer(200) // This wont assert, please ignore it
+    )
   }
 
   private def dfWithMultipleWatermarks(
